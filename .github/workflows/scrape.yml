@@ -2,7 +2,7 @@ name: Scrape NSE Option Chain
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/15 * * * *"    # every 15 minutes (UTC)
   workflow_dispatch: {}
 
 permissions:
@@ -19,7 +19,7 @@ jobs:
           - 4444:4444
         options: >-
           --shm-size="2g"
-          --health-cmd="curl -sf http://localhost:4444/status | grep -q '"ready": true' || exit 1"
+          --health-cmd="curl -sf http://localhost:4444/status | grep -q '\"ready\": true' || exit 1"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=30
@@ -31,7 +31,7 @@ jobs:
       - name: Setup R
         uses: r-lib/actions/setup-r@v2
 
-      # Faster & more reliable package install (with caching)
+      # Faster install + caching of R packages
       - name: Install R deps (pak)
         uses: r-lib/actions/setup-r-dependencies@v2
         with:
@@ -41,10 +41,9 @@ jobs:
             any::dplyr
             any::tidyr
             any::readr
+            any::readxl
             any::writexl
             any::stringr
-            any::readxl
-
 
       - name: Wait for Selenium
         run: |
