@@ -60,6 +60,32 @@ jobs:
       - name: Run scraper
         run: Rscript scrape_nse.R
 
+        - name: Commit results to repo (main branch)
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A output/
+          if ! git diff --cached --quiet; then
+            git commit -m "Update option chain $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
+            git push
+          else
+            echo "No changes to commit."
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # >>>>>>>>>>>>  END OF ADDED BLOCK  <<<<<<<<<<<<
+
+      - name: Upload artifacts (outputs + debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: option-chain-output
+          path: |
+            output/**
+            debug/**
+          if-no-files-found: warn
+
       - name: Upload artifacts (outputs + debug)
         if: always()
         uses: actions/upload-artifact@v4
