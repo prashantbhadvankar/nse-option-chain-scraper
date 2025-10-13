@@ -43,6 +43,8 @@ jobs:
             any::readr
             any::writexl
             any::stringr
+            any::readxl
+
 
       - name: Wait for Selenium
         run: |
