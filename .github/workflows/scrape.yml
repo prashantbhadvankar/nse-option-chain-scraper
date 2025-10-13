@@ -1,0 +1,72 @@
+name: Scrape NSE Option Chain
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes (UTC)
+  workflow_dispatch: {}       # allow manual run
+
+permissions:
+  contents: write             # only needed if you later push files back to repo
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    services:
+      selenium:
+        image: selenium/standalone-firefox:latest
+        ports:
+          - 4444:4444
+        options: >-
+          --shm-size="2g"
+          --health-cmd="curl -s http://localhost:4444/status || exit 1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+
+      - name: Install R packages
+        run: |
+          Rscript -e 'install.packages(c("RSelenium","rvest","dplyr","tidyr","readr","writexl","stringr"), repos="https://cloud.r-project.org")'
+
+      - name: Wait for Selenium
+        run: |
+          for i in {1..30}; do
+            if curl -s http://localhost:4444/status | grep -q '"ready": true'; then
+              echo "Selenium is ready"; exit 0
+            fi
+            echo "Waiting for Selenium..."; sleep 2
+          done
+          echo "Selenium not ready in time"; exit 1
+
+      - name: Run scraper
+        run: Rscript scrape_nse.R
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: option-chain-output
+          path: output/*
+          if-no-files-found: error
+
+      # OPTIONAL: push outputs back to repo (uncomment to use)
+      # - name: Commit results
+      #   run: |
+      #     git config user.name "github-actions[bot]"
+      #     git config user.email "github-actions[bot]@users.noreply.github.com"
+      #     git add output/*
+      #     git commit -m "Update option chain $(date -u +"%Y-%m-%d %H:%M:%S") UTC" || echo "No changes"
+      #     git push
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
