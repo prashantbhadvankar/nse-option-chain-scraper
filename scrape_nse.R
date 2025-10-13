@@ -115,13 +115,5 @@ j <- fromJSON(txt)
 # ---------------------------------------------------------------------
 #
 
-ts <- format(Sys.time(), "%Y-%m-%d_%H-%M-%S", tz = "UTC")
-csv_path  <- file.path("output", paste0("NIFTY_OptionChain_", ts, "_UTC.csv"))
-xlsx_path <- file.path("output", paste0("NIFTY_OptionChain_", ts, "_UTC.xlsx"))
 
-readr::write_csv(option_chain, csv_path)
-writexl::write_xlsx(list(NIFTY_OptionChain = option_chain), xlsx_path)
-
-log_msg("Saved:", csv_path)
-log_msg("Saved:", xlsx_path)
 
