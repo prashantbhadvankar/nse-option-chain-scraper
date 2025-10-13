@@ -29,12 +29,15 @@ retry <- function(expr, tries = 4, wait = 2) {
   stop(last)
 }
 
-# helper: safe numeric coalesce across possibly-missing columns
+# helper: safe numeric coalesce across possibly-missing columns (usable outside verbs)
 coalesce_num <- function(df, cols) {
-  # pick only the columns that exist
-  sel <- dplyr::pick(df, dplyr::any_of(cols))
+  sel <- dplyr::select(df, dplyr::any_of(cols))  # only existing columns
   if (ncol(sel) == 0) return(rep(NA_real_, nrow(df)))
-  suppressWarnings(as.numeric(dplyr::coalesce(!!!sel)))
+  out <- sel[[1]]
+  if (ncol(sel) >= 2) {
+    for (i in 2:ncol(sel)) out <- dplyr::coalesce(out, sel[[i]])
+  }
+  suppressWarnings(as.numeric(out))
 }
 
 # ------------------------ 1) get cookies with Selenium ------------------------
@@ -53,11 +56,12 @@ remDr <- remoteDriver(
 retry(remDr$open(), tries = 6, wait = 2)
 remDr$setTimeout("page load", 90000L)
 
+symbol <- "NIFTY"
+
 log_msg("Navigate to NSE home (seed Akamai cookies)")
 retry(remDr$navigate("https://www.nseindia.com"), tries = 4, wait = 2)
 Sys.sleep(3)
 
-symbol <- "NIFTY"
 log_msg("Navigate to derivatives page for referer")
 retry(remDr$navigate(paste0("https://www.nseindia.com/get-quotes/derivatives?symbol=", symbol)), tries = 4, wait = 2)
 Sys.sleep(3)
@@ -91,9 +95,8 @@ if (!nzchar(txt) || grepl("<HTML>|Access Denied", txt, ignore.case = TRUE)) {
   stop("API returned Access Denied / empty body")
 }
 
-# Save raw JSON for inspection
-raw_json_path <- file.path("output", paste0(symbol, "_OptionChain_raw.json"))
-writeLines(txt, raw_json_path)
+# Save raw JSON
+writeLines(txt, file.path("output", paste0(symbol, "_OptionChain_raw.json")))
 
 j <- fromJSON(txt, simplifyVector = TRUE)
 if (is.null(j$records) || is.null(j$records$data)) {
@@ -112,17 +115,11 @@ keys <- raw_df %>%
     strikePrice = suppressWarnings(as.numeric(.data$strikePrice))
   )
 
-# CE
-ce_wide <- raw_df %>%
-  select(expiryDate, strikePrice, CE) %>%
-  unnest_wider(CE, names_sep = "_", simplify = TRUE)
+# CE and PE wide expansions
+ce_wide <- raw_df %>% select(expiryDate, strikePrice, CE) %>% unnest_wider(CE, names_sep = "_", simplify = TRUE)
+pe_wide <- raw_df %>% select(expiryDate, strikePrice, PE) %>% unnest_wider(PE, names_sep = "_", simplify = TRUE)
 
-# PE
-pe_wide <- raw_df %>%
-  select(expiryDate, strikePrice, PE) %>%
-  unnest_wider(PE, names_sep = "_", simplify = TRUE)
-
-# Build CE numeric columns using column-safe coalescing
+# CE numeric columns (column-safe coalescing)
 ce_tbl <- ce_wide %>%
   mutate(
     strikePrice = suppressWarnings(as.numeric(strikePrice)),
@@ -138,7 +135,7 @@ ce_tbl <- ce_wide %>%
   ) %>%
   select(expiryDate, strikePrice, underlying, CE_OI:CE_ASKQTY)
 
-# Build PE numeric columns
+# PE numeric columns
 pe_tbl <- pe_wide %>%
   mutate(
     strikePrice = suppressWarnings(as.numeric(strikePrice)),
@@ -153,7 +150,7 @@ pe_tbl <- pe_wide %>%
   ) %>%
   select(expiryDate, strikePrice, PE_OI:PE_ASKQTY)
 
-# Join and tidy
+# Join, order, fill underlying down
 option_chain <- keys %>%
   left_join(ce_tbl, by = c("expiryDate", "strikePrice")) %>%
   left_join(pe_tbl, by = c("expiryDate", "strikePrice")) %>%
