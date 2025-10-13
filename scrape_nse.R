@@ -1,8 +1,9 @@
-# scrape_nse.R — NSE Option Chain via API (no Selenium; robust cookies + parsing)
+# scrape_nse.R — NSE Option Chain (no Selenium) → tidy table → CSV/XLSX
 
 library(httr)
 library(jsonlite)
 library(dplyr)
+library(tidyr)
 library(readr)
 library(writexl)
 
@@ -11,7 +12,6 @@ log_msg <- function(...) cat(format(Sys.time(), "[%Y-%m-%d %H:%M:%S]"), ..., "\n
 
 ua <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-# ---------- helpers ----------
 retry <- function(fun, tries = 4, wait = 2) {
   last <- NULL
   for (i in seq_len(tries)) {
@@ -22,17 +22,7 @@ retry <- function(fun, tries = 4, wait = 2) {
   stop(last)
 }
 
-get_num2 <- function(lst, fields, n) {
-  out <- vapply(lst, function(x) {
-    if (is.null(x) || !is.list(x) || length(x) == 0) return(NA_real_)
-    for (f in fields) if (!is.null(x[[f]])) return(suppressWarnings(as.numeric(x[[f]])))
-    NA_real_
-  }, numeric(1))
-  if (length(out) != n) out <- c(out, rep_len(NA_real_, n - length(out)))
-  out
-}
-
-# ---------- 1) warm cookies with an httr handle ----------
+# ---------- 1) Warm cookies (httr handle) ----------
 h <- handle("https://www.nseindia.com")
 
 log_msg("Warming cookies on homepage")
@@ -41,13 +31,11 @@ retry(function() {
     url    = "https://www.nseindia.com/",
     handle = h,
     user_agent(ua),
-    add_headers(
-      Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    )
+    add_headers(Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
   )
 }, tries = 5, wait = 1)
 
-# ---------- 2) call the Option Chain API through the same handle ----------
+# ---------- 2) Call Option Chain API ----------
 sym <- "NIFTY"
 api_url <- "https://www.nseindia.com/api/option-chain-indices"
 
@@ -71,7 +59,6 @@ stop_for_status(resp)
 txt <- content(resp, as = "text", encoding = "UTF-8")
 if (!nzchar(txt)) stop("Empty API response")
 
-# Save raw JSON for inspection
 writeLines(txt, file.path("output", paste0(sym, "_OptionChain_raw.json")))
 
 j <- fromJSON(txt, simplifyVector = TRUE)
@@ -80,55 +67,61 @@ if (is.null(j$records) || is.null(j$records$data)) stop("No records$data in API 
 raw_df <- as_tibble(j$records$data)
 if (!nrow(raw_df)) stop("records$data was empty")
 
-# ---------- 3) build tidy table (length-safe + multi-key) ----------
-n <- nrow(raw_df)
+# ---------- 3) Flatten CE and PE cleanly ----------
+# Keep symbol/keys
+keys <- raw_df %>%
+  transmute(symbol = if ("symbol" %in% names(raw_df)) symbol else sym,
+            expiryDate, strikePrice = suppressWarnings(as.numeric(strikePrice)))
 
-# Ensure CE/PE exist and have length n
-if (!"CE" %in% names(raw_df)) raw_df$CE <- replicate(n, NULL, simplify = FALSE)
-if (!"PE" %in% names(raw_df)) raw_df$PE <- replicate(n, NULL, simplify = FALSE)
-CE <- raw_df$CE; PE <- raw_df$PE
-if (length(CE) != n) CE <- c(CE, replicate(n - length(CE), NULL, simplify = FALSE))
-if (length(PE) != n) PE <- c(PE, replicate(n - length(PE), NULL, simplify = FALSE))
+# CE flatten
+ce <- raw_df %>%
+  select(expiryDate, strikePrice, CE) %>%
+  unnest_wider(CE, names_sep = "_", simplify = TRUE) %>%
+  mutate(
+    strikePrice = suppressWarnings(as.numeric(strikePrice)),
+    underlying  = coalesce(CE_underlyingValue, CE_underlyingvalue),
+    CE_OI       = suppressWarnings(as.numeric(CE_openInterest)),
+    CE_CHGOI    = suppressWarnings(as.numeric(CE_changeinOpenInterest)),
+    CE_IV       = suppressWarnings(as.numeric(CE_impliedVolatility)),
+    CE_LTP      = suppressWarnings(as.numeric(CE_lastPrice)),
+    CE_BIDQTY   = suppressWarnings(as.numeric(CE_bidQty)),
+    CE_BID      = suppressWarnings(as.numeric(coalesce(CE_bidprice, CE_bidPrice))),
+    CE_ASK      = suppressWarnings(as.numeric(coalesce(CE_askPrice, CE_askprice))),
+    CE_ASKQTY   = suppressWarnings(as.numeric(CE_askQty))
+  ) %>%
+  select(expiryDate, strikePrice, underlying, CE_OI:CE_ASKQTY)
 
-symbol_vec     <- if ("symbol" %in% names(raw_df)) as.character(raw_df$symbol) else rep(sym, n)
-expiry_vec     <- if ("expiryDate" %in% names(raw_df)) raw_df$expiryDate else rep(NA_character_, n)
-strike_vec     <- suppressWarnings(as.numeric(raw_df$strikePrice))[seq_len(n)]
-underlying_vec <- get_num2(CE, c("underlyingValue", "underlyingvalue"), n)
+# PE flatten
+pe <- raw_df %>%
+  select(expiryDate, strikePrice, PE) %>%
+  unnest_wider(PE, names_sep = "_", simplify = TRUE) %>%
+  mutate(
+    strikePrice = suppressWarnings(as.numeric(strikePrice)),
+    PE_OI       = suppressWarnings(as.numeric(PE_openInterest)),
+    PE_CHGOI    = suppressWarnings(as.numeric(PE_changeinOpenInterest)),
+    PE_IV       = suppressWarnings(as.numeric(PE_impliedVolatility)),
+    PE_LTP      = suppressWarnings(as.numeric(PE_lastPrice)),
+    PE_BIDQTY   = suppressWarnings(as.numeric(PE_bidQty)),
+    PE_BID      = suppressWarnings(as.numeric(coalesce(PE_bidprice, PE_bidPrice))),
+    PE_ASK      = suppressWarnings(as.numeric(coalesce(PE_askPrice, PE_askprice))),
+    PE_ASKQTY   = suppressWarnings(as.numeric(PE_askQty))
+  ) %>%
+  select(expiryDate, strikePrice, PE_OI:PE_ASKQTY)
 
-# forward-fill underlying
-if (n > 1) for (i in 2:n) if (is.na(underlying_vec[i])) underlying_vec[i] <- underlying_vec[i-1]
+# Join CE & PE on keys
+option_chain <- keys %>%
+  left_join(ce, by = c("expiryDate", "strikePrice")) %>%
+  left_join(pe, by = c("expiryDate", "strikePrice")) %>%
+  arrange(expiryDate, strikePrice) %>%
+  # forward-fill underlying (top-down)
+  tidyr::fill(underlying, .direction = "down")
 
-option_chain <- tibble::tibble(
-  symbol      = symbol_vec,
-  expiryDate  = expiry_vec,
-  strikePrice = strike_vec,
-  underlying  = underlying_vec,
-
-  CE_OI       = get_num2(CE, c("openInterest", "openinterest"), n),
-  CE_CHGOI    = get_num2(CE, c("changeinOpenInterest", "changeInOpenInterest", "chgOI"), n),
-  CE_IV       = get_num2(CE, c("impliedVolatility", "iv"), n),
-  CE_LTP      = get_num2(CE, c("lastPrice", "ltp"), n),
-  CE_BIDQTY   = get_num2(CE, c("bidQty", "bidqty"), n),
-  CE_BID      = get_num2(CE, c("bidprice", "bidPrice"), n),
-  CE_ASK      = get_num2(CE, c("askPrice", "askprice"), n),
-  CE_ASKQTY   = get_num2(CE, c("askQty", "askqty"), n),
-
-  PE_OI       = get_num2(PE, c("openInterest", "openinterest"), n),
-  PE_CHGOI    = get_num2(PE, c("changeinOpenInterest", "changeInOpenInterest", "chgOI"), n),
-  PE_IV       = get_num2(PE, c("impliedVolatility", "iv"), n),
-  PE_LTP      = get_num2(PE, c("lastPrice", "ltp"), n),
-  PE_BIDQTY   = get_num2(PE, c("bidQty", "bidqty"), n),
-  PE_BID      = get_num2(PE, c("bidprice", "bidPrice"), n),
-  PE_ASK      = get_num2(PE, c("askPrice", "askprice"), n),
-  PE_ASKQTY   = get_num2(PE, c("askQty", "askqty"), n)
-) %>% arrange(expiryDate, strikePrice)
-
-# diagnostics
+# Diagnostics
 nz <- vapply(option_chain, function(col) sum(!is.na(col)), integer(1))
-log_msg("Non-NA counts -> ", paste(names(nz), nz, sep=":", collapse=", "))
-log_msg("Rows in option_chain:", nrow(option_chain))
+log_msg("Non-NA counts → ", paste(names(nz), nz, sep = ":", collapse = ", "))
+log_msg("Rows →", nrow(option_chain))
 
-# ---------- 4) write files ----------
+# ---------- 4) Save CSV + XLSX ----------
 ts <- format(Sys.time(), "%Y-%m-%d_%H-%M-%S", tz = "UTC")
 csv_path  <- file.path("output", paste0(sym, "_OptionChain_", ts, "_UTC.csv"))
 xlsx_path <- file.path("output", paste0(sym, "_OptionChain_", ts, "_UTC.xlsx"))
