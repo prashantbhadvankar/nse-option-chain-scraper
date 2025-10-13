@@ -38,8 +38,8 @@ h <- handle("https://www.nseindia.com")
 log_msg("Warming cookies on homepage")
 retry(function() {
   GET(
+    url    = "https://www.nseindia.com/",
     handle = h,
-    path   = "/",
     user_agent(ua),
     add_headers(
       Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -48,21 +48,21 @@ retry(function() {
 }, tries = 5, wait = 1)
 
 # ---------- 2) call the Option Chain API through the same handle ----------
-api_path <- "/api/option-chain-indices"
 sym <- "NIFTY"
+api_url <- "https://www.nseindia.com/api/option-chain-indices"
 
 log_msg("Calling API for", sym)
 resp <- retry(function() {
   GET(
+    url    = api_url,
     handle = h,
-    path   = api_path,
     query  = list(symbol = sym),
     user_agent(ua),
     add_headers(
-      Accept          = "application/json, text/plain, */*",
+      Accept            = "application/json, text/plain, */*",
       `Accept-Language` = "en-US,en;q=0.9",
-      Referer         = paste0("https://www.nseindia.com/get-quotes/derivatives?symbol=", sym),
-      Connection      = "keep-alive"
+      Referer           = paste0("https://www.nseindia.com/get-quotes/derivatives?symbol=", sym),
+      Connection        = "keep-alive"
     )
   )
 }, tries = 5, wait = 2)
