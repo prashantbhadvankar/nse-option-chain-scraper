@@ -108,50 +108,73 @@ raw_df <- dplyr::as_tibble(j$records$data)
 if (nrow(raw_df) == 0) { save_debug("api_empty_data"); stop("NSE API returned empty 'records$data'.") }
 
 # --- Build tidy table from CE/PE list-columns (robust) ---
-if (!"CE" %in% names(raw_df)) raw_df$CE <- replicate(nrow(raw_df), NULL, simplify = FALSE)
-if (!"PE" %in% names(raw_df)) raw_df$PE <- replicate(nrow(raw_df), NULL, simplify = FALSE)
+# --- Build tidy table from CE/PE list-columns (length-safe) ---
+
+n <- nrow(raw_df)
+
+# Ensure CE/PE exist and have length n
+if (!"CE" %in% names(raw_df)) raw_df$CE <- replicate(n, NULL, simplify = FALSE)
+if (!"PE" %in% names(raw_df)) raw_df$PE <- replicate(n, NULL, simplify = FALSE)
 
 CE <- raw_df$CE
 PE <- raw_df$PE
 
-safe_extract <- function(x, fld, as_numeric = TRUE) {
-  val <- tryCatch({
-    if (is.null(x) || !is.list(x) || length(x) == 0 || is.null(x[[fld]])) NA else x[[fld]]
-  }, error = function(e) NA)
-  if (as_numeric) suppressWarnings(as.numeric(val)) else val
-}
-get_num <- function(lst, fld) vapply(lst, function(x) safe_extract(x, fld, TRUE), numeric(1))
+# If for any reason lengths don't match, pad with NULLs to length n
+if (length(CE) != n) CE <- c(CE, replicate(n - length(CE), NULL, simplify = FALSE))
+if (length(PE) != n) PE <- c(PE, replicate(n - length(PE), NULL, simplify = FALSE))
 
-underlying <- get_num(CE, "underlyingValue")
-if (length(underlying)) for (i in seq_along(underlying)) if (i > 1 && is.na(underlying[i])) underlying[i] <- underlying[i-1]
+safe_dbl <- function(lst, field) {
+  out <- vapply(lst, function(x) {
+    if (is.null(x) || !is.list(x) || is.null(x[[field]])) NA_real_
+    else suppressWarnings(as.numeric(x[[field]]))
+  }, numeric(1))
+  # force exact length n
+  if (length(out) != n) out <- c(out, rep_len(NA_real_, n - length(out)))
+  out
+}
+
+# vectors (all length n)
+symbol_vec     <- if ("symbol" %in% names(raw_df)) as.character(raw_df$symbol) else rep("NIFTY", n)
+expiry_vec     <- if ("expiryDate" %in% names(raw_df)) raw_df$expiryDate else rep(NA_character_, n)
+strike_vec     <- suppressWarnings(as.numeric(raw_df$strikePrice))[seq_len(n)]
+underlying_vec <- safe_dbl(CE, "underlyingValue")
+
+# forward-fill underlying if missing
+if (n > 1) for (i in 2:n) if (is.na(underlying_vec[i])) underlying_vec[i] <- underlying_vec[i-1]
 
 option_chain <- tibble::tibble(
-  symbol      = if ("symbol" %in% names(raw_df)) raw_df$symbol else "NIFTY",
-  expiryDate  = raw_df$expiryDate,
-  strikePrice = suppressWarnings(as.numeric(raw_df$strikePrice)),
-  underlying  = underlying,
+  symbol      = symbol_vec,
+  expiryDate  = expiry_vec,
+  strikePrice = strike_vec,
+  underlying  = underlying_vec,
 
-  CE_OI       = get_num(CE, "openInterest"),
-  CE_CHGOI    = get_num(CE, "changeinOpenInterest"),
-  CE_IV       = get_num(CE, "impliedVolatility"),
-  CE_LTP      = get_num(CE, "lastPrice"),
-  CE_BIDQTY   = get_num(CE, "bidQty"),
-  CE_BID      = get_num(CE, "bidprice"),
-  CE_ASK      = get_num(CE, "askPrice"),
-  CE_ASKQTY   = get_num(CE, "askQty"),
+  CE_OI       = safe_dbl(CE, "openInterest"),
+  CE_CHGOI    = safe_dbl(CE, "changeinOpenInterest"),
+  CE_IV       = safe_dbl(CE, "impliedVolatility"),
+  CE_LTP      = safe_dbl(CE, "lastPrice"),
+  CE_BIDQTY   = safe_dbl(CE, "bidQty"),
+  CE_BID      = safe_dbl(CE, "bidprice"),
+  CE_ASK      = safe_dbl(CE, "askPrice"),
+  CE_ASKQTY   = safe_dbl(CE, "askQty"),
 
-  PE_OI       = get_num(PE, "openInterest"),
-  PE_CHGOI    = get_num(PE, "changeinOpenInterest"),
-  PE_IV       = get_num(PE, "impliedVolatility"),
-  PE_LTP      = get_num(PE, "lastPrice"),
-  PE_BIDQTY   = get_num(PE, "bidQty"),
-  PE_BID      = get_num(PE, "bidprice"),
-  PE_ASK      = get_num(PE, "askPrice"),
-  PE_ASKQTY   = get_num(PE, "askQty")
-) %>% arrange(expiryDate, strikePrice)
+  PE_OI       = safe_dbl(PE, "openInterest"),
+  PE_CHGOI    = safe_dbl(PE, "changeinOpenInterest"),
+  PE_IV       = safe_dbl(PE, "impliedVolatility"),
+  PE_LTP      = safe_dbl(PE, "lastPrice"),
+  PE_BIDQTY   = safe_dbl(PE, "bidQty"),
+  PE_BID      = safe_dbl(PE, "bidprice"),
+  PE_ASK      = safe_dbl(PE, "askPrice"),
+  PE_ASKQTY   = safe_dbl(PE, "askQty")
+) %>%
+  dplyr::arrange(expiryDate, strikePrice)
 
-if (!nrow(option_chain)) { save_debug("option_chain_empty_after_parse"); stop("Built option_chain is empty.") }
+if (!nrow(option_chain)) {
+  save_debug("option_chain_empty_after_parse")
+  stop("Built option_chain is empty.")
+}
+
 log_msg("Rows in option_chain:", nrow(option_chain))
+
 
 # 4) save
 ts <- format(Sys.time(), "%Y-%m-%d_%H-%M-%S", tz = "UTC")
