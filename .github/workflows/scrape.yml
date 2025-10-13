@@ -60,13 +60,21 @@ jobs:
       - name: Run scraper
         run: Rscript scrape_nse.R
 
-      # Commit outputs to the repo (main branch)
       - name: Commit results to repo (main branch)
         if: success()
         run: |
+          echo "Output dir contents:"
+          ls -lah output || true
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A output/
+
+          # Explicitly add the desired files
+          git add output/*.csv 2>/dev/null || true
+          git add output/*.xlsx 2>/dev/null || true
+          git add output/*_raw.json 2>/dev/null || true
+
+          # Commit only if there are staged changes
           if ! git diff --cached --quiet; then
             git commit -m "Update option chain $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
             git push
