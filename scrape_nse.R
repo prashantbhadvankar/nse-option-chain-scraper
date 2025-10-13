@@ -110,7 +110,71 @@ if (!nzchar(txt)) {
 # Save raw JSON for verification
 writeLines(txt, file.path("output", "NIFTY_OptionChain_raw.json"))
 
-j <- fromJSON(txt)
+# Parse JSON safely and validate structure
+j <- try(jsonlite::fromJSON(txt), silent = TRUE)
+if (inherits(j, "try-error")) {
+  save_debug("json_parse_error")
+  stop("Failed to parse JSON from NSE.")
+}
+
+if (is.null(j$records) || is.null(j$records$data)) {
+  save_debug("api_missing_records_data")
+  stop("NSE API returned no 'records$data' field.")
+}
+
+raw_df <- dplyr::as_tibble(j$records$data)
+if (nrow(raw_df) == 0) {
+  save_debug("api_empty_data")
+  stop("NSE API returned an empty 'records$data'.")
+}
+
+# --- Build tidy table from CE/PE list-columns ---
+get_num <- function(lst, fld) {
+  vapply(lst, function(x) {
+    if (is.null(x) || is.null(x[[fld]])) NA_real_ else suppressWarnings(as.numeric(x[[fld]]))
+  }, numeric(1))
+}
+
+CE <- raw_df$CE
+PE <- raw_df$PE
+
+underlying <- get_num(CE, "underlyingValue")
+if (length(underlying)) {
+  for (i in seq_along(underlying)) if (i > 1 && is.na(underlying[i])) underlying[i] <- underlying[i-1]
+}
+
+option_chain <- tibble::tibble(
+  symbol      = if ("symbol" %in% names(raw_df)) raw_df$symbol else "NIFTY",
+  expiryDate  = raw_df$expiryDate,
+  strikePrice = suppressWarnings(as.numeric(raw_df$strikePrice)),
+  underlying  = underlying,
+
+  CE_OI       = get_num(CE, "openInterest"),
+  CE_CHGOI    = get_num(CE, "changeinOpenInterest"),
+  CE_IV       = get_num(CE, "impliedVolatility"),
+  CE_LTP      = get_num(CE, "lastPrice"),
+  CE_BIDQTY   = get_num(CE, "bidQty"),
+  CE_BID      = get_num(CE, "bidprice"),
+  CE_ASK      = get_num(CE, "askPrice"),
+  CE_ASKQTY   = get_num(CE, "askQty"),
+
+  PE_OI       = get_num(PE, "openInterest"),
+  PE_CHGOI    = get_num(PE, "changeinOpenInterest"),
+  PE_IV       = get_num(PE, "impliedVolatility"),
+  PE_LTP      = get_num(PE, "lastPrice"),
+  PE_BIDQTY   = get_num(PE, "bidQty"),
+  PE_BID      = get_num(PE, "bidprice"),
+  PE_ASK      = get_num(PE, "askPrice"),
+  PE_ASKQTY   = get_num(PE, "askQty")
+) %>%
+  dplyr::arrange(expiryDate, strikePrice)
+
+if (!exists("option_chain") || nrow(option_chain) == 0) {
+  save_debug("option_chain_empty_after_parse")
+  stop("Built option_chain is empty.")
+}
+
+log_msg("Rows in option_chain:", nrow(option_chain))
 
 ts <- format(Sys.time(), "%Y-%m-%d_%H-%M-%S", tz = "UTC")
 csv_path  <- file.path("output", paste0("NIFTY_OptionChain_", ts, "_UTC.csv"))
@@ -118,9 +182,3 @@ xlsx_path <- file.path("output", paste0("NIFTY_OptionChain_", ts, "_UTC.xlsx"))
 
 readr::write_csv(option_chain, csv_path)
 writexl::write_xlsx(list(NIFTY_OptionChain = option_chain), xlsx_path)
-
-log_msg("Saved:", csv_path)
-log_msg("Saved:", xlsx_path)
-
-
-
