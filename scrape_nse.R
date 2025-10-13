@@ -13,12 +13,13 @@ ua <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML
 
 # ---------- helpers ----------
 retry <- function(fun, tries = 4, wait = 2) {
+  last <- NULL
   for (i in seq_len(tries)) {
-    res <- try(fun(), silent = TRUE)
-    if (!inherits(res, "try-error")) return(res)
+    last <- try(fun(), silent = TRUE)
+    if (!inherits(last, "try-error")) return(last)
     if (i < tries) Sys.sleep(wait * i)
   }
-  stop(res)
+  stop(last)
 }
 
 get_num2 <- function(lst, fields, n) {
@@ -35,30 +36,42 @@ get_num2 <- function(lst, fields, n) {
 h <- handle("https://www.nseindia.com")
 
 log_msg("Warming cookies on homepage")
-retry(function() GET(handle = h, path = "/", add_headers(
-  "User-Agent" = ua,
-  "Accept"     = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-))), tries = 5, wait = 1)
+retry(function() {
+  GET(
+    handle = h,
+    path   = "/",
+    user_agent(ua),
+    add_headers(
+      Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    )
+  )
+}, tries = 5, wait = 1)
 
 # ---------- 2) call the Option Chain API through the same handle ----------
 api_path <- "/api/option-chain-indices"
 sym <- "NIFTY"
 
 log_msg("Calling API for", sym)
-resp <- retry(function() GET(handle = h, path = api_path, query = list(symbol = sym),
-                             add_headers(
-                               "User-Agent"      = ua,
-                               "Accept"          = "application/json, text/plain, */*",
-                               "Accept-Language" = "en-US,en;q=0.9",
-                               "Referer"         = paste0("https://www.nseindia.com/get-quotes/derivatives?symbol=", sym),
-                               "Connection"      = "keep-alive"
-                             ))), tries = 5, wait = 2)
+resp <- retry(function() {
+  GET(
+    handle = h,
+    path   = api_path,
+    query  = list(symbol = sym),
+    user_agent(ua),
+    add_headers(
+      Accept          = "application/json, text/plain, */*",
+      `Accept-Language` = "en-US,en;q=0.9",
+      Referer         = paste0("https://www.nseindia.com/get-quotes/derivatives?symbol=", sym),
+      Connection      = "keep-alive"
+    )
+  )
+}, tries = 5, wait = 2)
 
 stop_for_status(resp)
 txt <- content(resp, as = "text", encoding = "UTF-8")
 if (!nzchar(txt)) stop("Empty API response")
 
-# Save raw JSON for quick inspection
+# Save raw JSON for inspection
 writeLines(txt, file.path("output", paste0(sym, "_OptionChain_raw.json")))
 
 j <- fromJSON(txt, simplifyVector = TRUE)
@@ -85,7 +98,7 @@ underlying_vec <- get_num2(CE, c("underlyingValue", "underlyingvalue"), n)
 # forward-fill underlying
 if (n > 1) for (i in 2:n) if (is.na(underlying_vec[i])) underlying_vec[i] <- underlying_vec[i-1]
 
-option_chain <- tibble(
+option_chain <- tibble::tibble(
   symbol      = symbol_vec,
   expiryDate  = expiry_vec,
   strikePrice = strike_vec,
@@ -108,8 +121,7 @@ option_chain <- tibble(
   PE_BID      = get_num2(PE, c("bidprice", "bidPrice"), n),
   PE_ASK      = get_num2(PE, c("askPrice", "askprice"), n),
   PE_ASKQTY   = get_num2(PE, c("askQty", "askqty"), n)
-) %>%
-  arrange(expiryDate, strikePrice)
+) %>% arrange(expiryDate, strikePrice)
 
 # diagnostics
 nz <- vapply(option_chain, function(col) sum(!is.na(col)), integer(1))
