@@ -139,13 +139,4 @@ for (nm in intersect(maybe_numeric, names(option_chain))) {
 
 # Save
 ts <- format(Sys.time(), "%Y-%m-%d_%H-%M-%S", tz = "UTC")
-csv_path  <- file.path("output", paste0("NIFTY_OptionChain_", ts, "_UTC.csv"))
-xlsx_path <- file.path("output", paste0("NIFTY_OptionChain_", ts, "_UTC.xlsx"))
-
-write_csv(option_chain, csv_path)
-writexl::write_xlsx(list(NIFTY_OptionChain = option_chain), xlsx_path)
-
-log_msg("Wrote:", csv_path)
-log_msg("Wrote:", xlsx_path)
-
-try(remDr$close(), silent = TRUE)
+csv_path  <- fi_
