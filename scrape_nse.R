@@ -84,10 +84,63 @@ Sys.sleep(5)
 save_debug("after_navigate")
 
 # Click the Option Chain tab (your id)
-log_msg("Clicking Option Chain tab")
-tab <- retry(remDr$findElement("id", "equity-derivative-cntrctinfo-optionchain-main"))
-retry(tab$clickElement())
-Sys.sleep(4)
+# --- Click the Option Chain tab (robust) ---
+log_msg("Clicking Option Chain tab (robust)")
+
+# 1) Wait for the tab anchor to exist in the DOM
+tab_el <- try(wait_for("a#equity-derivative-cntrctinfo-optionchain-main", timeout = 60), silent = TRUE)
+
+# 2) If not found, try alternative selectors
+if (inherits(tab_el, "try-error")) {
+  log_msg("Primary selector failed; trying fallbacks for Option Chain tab")
+  alt_selectors <- c(
+    "#equity-derivative-cntrctinfo-optionchain-main",
+    "a[href='#equity-derivative-cntrctinfo-optionchain']",
+    "a.nav-link[data-bs-toggle='tab'][href*='optionchain']",
+    "//a[contains(@href, 'optionchain')]",
+    "//a[normalize-space()='Option Chain']"
+  )
+  for (sel in alt_selectors) {
+    tab_el <- try(
+      if (startsWith(sel, "//")) remDr$findElement("xpath", sel)
+      else remDr$findElement("css selector", sel),
+      silent = TRUE
+    )
+    if (!inherits(tab_el, "try-error")) break
+  }
+}
+
+# 3) If still not found, try loading the hash URL directly (sometimes activates the tab)
+if (inherits(tab_el, "try-error")) {
+  log_msg("Tab element not found; navigating directly to hash URL and retrying")
+  retry(remDr$navigate("https://www.nseindia.com/get-quotes/derivatives?symbol=NIFTY#equity-derivative-cntrctinfo-optionchain"))
+  Sys.sleep(4)
+  tab_el <- try(wait_for("#equity-derivative-optionChainTable", timeout = 20), silent = TRUE)
+  if (!inherits(tab_el, "try-error")) {
+    log_msg("Option Chain content loaded via hash URL")
+  } else {
+    # Last attempt: dump debug and stop
+    save_debug("option_tab_not_found")
+    stop("Could not locate/click the Option Chain tab")
+  }
+} else {
+  # 4) Scroll into view and click via JS (more reliable than WebDriver click here)
+  try(remDr$executeScript("arguments[0].scrollIntoView({block: 'center'});", list(tab_el)), silent = TRUE)
+  Sys.sleep(1)
+  # JS click
+  retry(remDr$executeScript("arguments[0].click();", list(tab_el)))
+  Sys.sleep(3)
+}
+
+# 5) Wait for the Option Chain content to be present
+log_msg("Waiting for option chain table container after click")
+oc_div <- try(wait_for("#equity-derivative-optionChainTable", timeout = 60), silent = TRUE)
+if (inherits(oc_div, "try-error")) {
+  log_msg("Option chain container not visible after click; saving debug")
+  save_debug("option_chain_missing_post_click")
+  stop("Option Chain container did not appear after clicking the tab")
+}
+
 
 # Wait for the Option Chain container
 log_msg("Waiting for option chain table container")
