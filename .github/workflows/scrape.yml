@@ -44,6 +44,8 @@ jobs:
             any::readxl
             any::writexl
             any::stringr
+            any::httr         
+            any::jsonlite 
 
       - name: Wait for Selenium
         run: |
