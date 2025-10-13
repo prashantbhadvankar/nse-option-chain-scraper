@@ -1,6 +1,5 @@
-# scrape_nse.R — NSE Option Chain via API (stable for GitHub Actions)
+# scrape_nse.R — NSE Option Chain via API (robust)
 
-# pkgs
 library(RSelenium)
 library(httr)
 library(jsonlite)
@@ -9,17 +8,12 @@ library(tidyr)
 library(readr)
 library(writexl)
 
-# ---------------------------------------------------------------------
-# setup
 dir.create("output", showWarnings = FALSE)
 dir.create("debug",  showWarnings = FALSE)
-
 log_msg <- function(...) cat(format(Sys.time(), "[%Y-%m-%d %H:%M:%S]"), ..., "\n")
 
-# Desktop UA helps with NSE/CDN
 ua <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-# Connect to Selenium running as a service in GitHub Actions (localhost:4444)
 remDr <- remoteDriver(
   remoteServerAddr = "localhost",
   port = 4444L,
@@ -42,13 +36,11 @@ retry <- function(expr, tries = 3, wait = 3) {
 }
 
 save_debug <- function(name, remDr_obj = remDr) {
-  # screenshot
   try({
     f <- file.path("debug", paste0(name, "_screenshot.png"))
     remDr_obj$screenshot(file = f)
     log_msg("Saved screenshot:", f)
   }, silent = TRUE)
-  # page source
   try({
     ps <- remDr_obj$getPageSource()[[1]]
     f2 <- file.path("debug", paste0(name, "_page.html"))
@@ -57,8 +49,7 @@ save_debug <- function(name, remDr_obj = remDr) {
   }, silent = TRUE)
 }
 
-# ---------------------------------------------------------------------
-# 1) open NSE pages to seed cookies
+# 1) seed cookies
 log_msg("Opening Selenium session")
 retry(remDr$open(), tries = 5, wait = 2)
 remDr$setTimeout("page load", 90000L)
@@ -71,18 +62,14 @@ log_msg("Visit NIFTY derivatives page (referer for API)")
 retry(remDr$navigate("https://www.nseindia.com/get-quotes/derivatives?symbol=NIFTY"), tries = 3, wait = 3)
 Sys.sleep(3)
 
-# Build Cookie header from Selenium session
 cks <- remDr$getAllCookies()
 if (length(cks) == 0) { Sys.sleep(2); cks <- remDr$getAllCookies() }
 cookie_header <- if (length(cks)) {
   paste(vapply(cks, function(x) paste0(x$name, "=", x$value), ""), collapse = "; ")
-} else {
-  ""  # API often still works with just UA+Referer
-}
+} else ""
 log_msg("Cookie header length:", nchar(cookie_header))
 
-# ---------------------------------------------------------------------
-# 2) call official NSE API (more reliable than clicking tabs in headless)
+# 2) call API
 api_url <- "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
 log_msg("Calling API:", api_url)
 
@@ -107,41 +94,36 @@ if (!nzchar(txt)) {
   stop("Empty API response")
 }
 
-# Save raw JSON for verification
 writeLines(txt, file.path("output", "NIFTY_OptionChain_raw.json"))
 
-# Parse JSON safely and validate structure
 j <- try(jsonlite::fromJSON(txt), silent = TRUE)
 if (inherits(j, "try-error")) {
-  save_debug("json_parse_error")
-  stop("Failed to parse JSON from NSE.")
+  save_debug("json_parse_error"); stop("Failed to parse JSON from NSE.")
 }
-
 if (is.null(j$records) || is.null(j$records$data)) {
-  save_debug("api_missing_records_data")
-  stop("NSE API returned no 'records$data' field.")
+  save_debug("api_missing_records_data"); stop("NSE API returned no 'records$data'.")
 }
 
 raw_df <- dplyr::as_tibble(j$records$data)
-if (nrow(raw_df) == 0) {
-  save_debug("api_empty_data")
-  stop("NSE API returned an empty 'records$data'.")
-}
+if (nrow(raw_df) == 0) { save_debug("api_empty_data"); stop("NSE API returned empty 'records$data'.") }
 
-# --- Build tidy table from CE/PE list-columns ---
-get_num <- function(lst, fld) {
-  vapply(lst, function(x) {
-    if (is.null(x) || is.null(x[[fld]])) NA_real_ else suppressWarnings(as.numeric(x[[fld]]))
-  }, numeric(1))
-}
+# --- Build tidy table from CE/PE list-columns (robust) ---
+if (!"CE" %in% names(raw_df)) raw_df$CE <- replicate(nrow(raw_df), NULL, simplify = FALSE)
+if (!"PE" %in% names(raw_df)) raw_df$PE <- replicate(nrow(raw_df), NULL, simplify = FALSE)
 
 CE <- raw_df$CE
 PE <- raw_df$PE
 
-underlying <- get_num(CE, "underlyingValue")
-if (length(underlying)) {
-  for (i in seq_along(underlying)) if (i > 1 && is.na(underlying[i])) underlying[i] <- underlying[i-1]
+safe_extract <- function(x, fld, as_numeric = TRUE) {
+  val <- tryCatch({
+    if (is.null(x) || !is.list(x) || length(x) == 0 || is.null(x[[fld]])) NA else x[[fld]]
+  }, error = function(e) NA)
+  if (as_numeric) suppressWarnings(as.numeric(val)) else val
 }
+get_num <- function(lst, fld) vapply(lst, function(x) safe_extract(x, fld, TRUE), numeric(1))
+
+underlying <- get_num(CE, "underlyingValue")
+if (length(underlying)) for (i in seq_along(underlying)) if (i > 1 && is.na(underlying[i])) underlying[i] <- underlying[i-1]
 
 option_chain <- tibble::tibble(
   symbol      = if ("symbol" %in% names(raw_df)) raw_df$symbol else "NIFTY",
@@ -166,19 +148,20 @@ option_chain <- tibble::tibble(
   PE_BID      = get_num(PE, "bidprice"),
   PE_ASK      = get_num(PE, "askPrice"),
   PE_ASKQTY   = get_num(PE, "askQty")
-) %>%
-  dplyr::arrange(expiryDate, strikePrice)
+) %>% arrange(expiryDate, strikePrice)
 
-if (!exists("option_chain") || nrow(option_chain) == 0) {
-  save_debug("option_chain_empty_after_parse")
-  stop("Built option_chain is empty.")
-}
-
+if (!nrow(option_chain)) { save_debug("option_chain_empty_after_parse"); stop("Built option_chain is empty.") }
 log_msg("Rows in option_chain:", nrow(option_chain))
 
+# 4) save
 ts <- format(Sys.time(), "%Y-%m-%d_%H-%M-%S", tz = "UTC")
 csv_path  <- file.path("output", paste0("NIFTY_OptionChain_", ts, "_UTC.csv"))
 xlsx_path <- file.path("output", paste0("NIFTY_OptionChain_", ts, "_UTC.xlsx"))
 
 readr::write_csv(option_chain, csv_path)
 writexl::write_xlsx(list(NIFTY_OptionChain = option_chain), xlsx_path)
+
+log_msg("Saved:", csv_path)
+log_msg("Saved:", xlsx_path)
+
+try(remDr$close(), silent = TRUE)
