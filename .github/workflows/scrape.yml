@@ -2,27 +2,16 @@ name: Scrape NSE Option Chain
 
 on:
   schedule:
-    # Every 10 minutes, Monday–Friday, 09:00–16:00 IST (UTC+5:30) -> 03:00–10:30 UTC
+    # Mon–Fri, every 10 min, 09:00–16:00 IST (UTC 03:30–10:30)
     - cron: "*/10 3-10 * * 1-5"
   workflow_dispatch: {}
 
 permissions:
   contents: write
 
-concurrency:
-  group: nse-option-chain
-  cancel-in-progress: true
-
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
-    # optional retry-attempt pattern to mitigate transient errors
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        attempt: [1, 2]
 
     services:
       selenium:
@@ -82,8 +71,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Stage only generated files
-          git add output/*.csv 2>/dev/null || true
+          git add output/*.csv  2>/dev/null || true
           git add output/*.xlsx 2>/dev/null || true
           git add output/*_raw.json 2>/dev/null || true
 
@@ -94,45 +82,34 @@ jobs:
             echo "No changes to commit."
           fi
 
-      # ---------- Google Drive upload (Service Account) ----------
-      - name: Write Google SA JSON to file
-        if: success()
-        run: |
-          printf '%s' '${{ secrets.GDRIVE_SA_JSON }}' > "$GITHUB_WORKSPACE/sa.json"
-          test -s "$GITHUB_WORKSPACE/sa.json" || { echo "SA JSON is empty or missing!"; exit 1; }
-          sudo apt-get update -y && sudo apt-get install -y jq
-          echo "Service account email (redacted):"
-          jq -r '.client_email' "$GITHUB_WORKSPACE/sa.json" | sed 's/@.*/@*** (redacted)/'
-          ls -lah "$GITHUB_WORKSPACE"
-
-      - name: Install rclone
-        if: success()
-        run: |
-          curl -fsSL https://rclone.org/install.sh | sudo bash
-          rclone version
-
-      - name: Configure rclone for Drive
-        if: success()
-        env:
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-        run: |
-          mkdir -p "$HOME/.config/rclone"
-          cat > "$HOME/.config/rclone/rclone.conf" <<'RC'
-          [gdrive]
-          type = drive
-          scope = drive
-          service_account_file = ${GITHUB_WORKSPACE}/sa.json
-          root_folder_id = ${GDRIVE_FOLDER_ID}
-          RC
-          rclone config show gdrive
-
+      # ---------- Google Drive upload (with diagnostics) ----------
       - name: Upload latest Excel to Google Drive
         if: success()
+        env:
+          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
+          set -euo pipefail
+
+          echo "$GDRIVE_SA_JSON" > sa.json
+
           LATEST_XLSX="$(ls -1t output/*.xlsx | head -n 1)"
-          echo "Uploading: $LATEST_XLSX"
-          rclone copy "$LATEST_XLSX" gdrive: --drive-stop-on-upload-limit --progress
-      # -----------------------------------------------------------
+          echo "Uploading: ${LATEST_XLSX}"
+          echo "Folder ID: ${GDRIVE_FOLDER_ID}"
+
+          # Diagnostic: verify access to the folder by ID
+          rclone -vv lsf ":drive,service_account_file=sa.json,root_folder_id=${GDRIVE_FOLDER_ID}:" || {
+            echo ">>> ERROR: rclone couldn't access the folder."
+            echo "    Check BOTH:"
+            echo "      - GDRIVE_FOLDER_ID is the exact folder ID (from URL after 'folders/')"
+            echo "      - The service account is shared on that folder (Editor) or added to the Shared Drive."
+            exit 1
+          }
+
+          # Upload newest Excel
+          rclone -vv copy "${LATEST_XLSX}" ":drive,service_account_file=sa.json,root_folder_id=${GDRIVE_FOLDER_ID}:" --progress
+
+          echo "Upload complete."
 
       - name: Upload artifacts (outputs + debug)
         if: always()
