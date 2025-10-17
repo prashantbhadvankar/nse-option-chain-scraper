@@ -8,8 +8,9 @@ on:
 
 # avoid overlapping runs fighting for cookies/IP
 concurrency:
-  group: nse-option-chain
-  cancel-in-progress: true
+  group: nse-option-chain-${{ github.event_name }}   # separate groups per event
+  cancel-in-progress: true                           # still prevents overlap *within* each event
+
 
 jobs:
   scrape:
