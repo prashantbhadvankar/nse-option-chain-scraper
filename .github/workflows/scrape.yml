@@ -2,7 +2,7 @@ name: Scrape NSE Option Chain
 
 on:
   schedule:
-    # Mon–Fri, every 10 min, 09:00–16:00 IST (UTC 03:30–10:30)
+    # Mon–Fri 09:00–16:00 IST (03:30–10:30 UTC), every 10 minutes
     - cron: "*/10 3-10 * * 1-5"
   workflow_dispatch: {}
 
@@ -16,8 +16,7 @@ jobs:
     services:
       selenium:
         image: selenium/standalone-firefox:latest
-        ports:
-          - 4444:4444
+        ports: ["4444:4444"]
         options: >-
           --shm-size="2g"
           --health-cmd="curl -sf http://localhost:4444/status | grep -q '\"ready\": true' || exit 1"
@@ -68,7 +67,7 @@ jobs:
           echo "Output dir contents:"
           ls -lah output || true
 
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add output/*.csv  2>/dev/null || true
@@ -82,41 +81,71 @@ jobs:
             echo "No changes to commit."
           fi
 
-      # ---------- Google Drive upload (with diagnostics) ----------
-      - name: Upload latest Excel to Google Drive
-        if: success()
+      # ---------------- Google Drive upload ----------------
+
+      - name: Install rclone
+        run: |
+          if ! command -v rclone >/dev/null 2>&1; then
+            sudo apt-get update -y || true
+            sudo apt-get install -y rclone || {
+              curl -fsSL https://rclone.org/install.sh | sudo -E bash
+            }
+          fi
+          rclone version
+
+      - name: Prepare rclone config (service account)
         env:
           GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+        run: |
+          # Write the service-account JSON to a file rclone can read
+          echo "$GDRIVE_SA_JSON" > sa.json
+
+          # Create a minimal rclone config that uses that SA
+          cat > rclone.conf <<'CFG'
+          [gdrive]
+          type = drive
+          scope = drive
+          service_account_file = sa.json
+          CFG
+
+          echo "rclone config created:"
+          sed -n '1,3p' rclone.conf
+
+      - name: Upload latest Excel to Google Drive
+        env:
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        shell: bash
         run: |
           set -euo pipefail
 
-          echo "$GDRIVE_SA_JSON" > sa.json
+          LATEST_XLSX="$(ls -1t output/*UTC.xlsx | head -n 1 || true)"
+          echo "Uploading: ${LATEST_XLSX:-<none found>}"
+          echo "Folder ID: ${GDRIVE_FOLDER_ID:-<missing>}"
 
-          LATEST_XLSX="$(ls -1t output/*.xlsx | head -n 1)"
-          echo "Uploading: ${LATEST_XLSX}"
-          echo "Folder ID: ${GDRIVE_FOLDER_ID}"
+          if [[ -z "${LATEST_XLSX:-}" ]]; then
+            echo "No XLSX found in output/. Nothing to upload."
+            exit 0
+          fi
 
-          # Diagnostic: verify access to the folder by ID
-          rclone -vv lsf ":drive,service_account_file=sa.json,root_folder_id=${GDRIVE_FOLDER_ID}:" || {
+          if [[ -z "${GDRIVE_FOLDER_ID:-}" ]]; then
+            echo "ERROR: GDRIVE_FOLDER_ID secret is missing."
+            exit 1
+          fi
+
+          # Try to upload to the specified folder
+          rclone --config rclone.conf copy "${LATEST_XLSX}" "gdrive:${GDRIVE_FOLDER_ID}" --progress || {
             echo ">>> ERROR: rclone couldn't access the folder."
             echo "    Check BOTH:"
-            echo "      - GDRIVE_FOLDER_ID is the exact folder ID (from URL after 'folders/')"
-            echo "      - The service account is shared on that folder (Editor) or added to the Shared Drive."
+            echo "    - GDRIVE_FOLDER_ID is the exact folder ID (from Drive URL after 'folders/')"
+            echo "    - The service account is shared on that folder (Editor) or on the Shared Drive."
             exit 1
           }
 
-          # Upload newest Excel
-          rclone -vv copy "${LATEST_XLSX}" ":drive,service_account_file=sa.json,root_folder_id=${GDRIVE_FOLDER_ID}:" --progress
-
-          echo "Upload complete."
-
-      - name: Upload artifacts (outputs + debug)
+      # Keep a copy as a workflow artifact too (optional)
+      - name: Upload artifact (latest xlsx)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: option-chain-output
-          path: |
-            output/**
-            debug/**
+          name: latest-xlsx
+          path: output/*UTC.xlsx
           if-no-files-found: warn
