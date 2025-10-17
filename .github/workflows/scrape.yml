@@ -2,14 +2,24 @@ name: Scrape NSE Option Chain
 
 on:
   schedule:
-    - cron: "*/15 * * * *"    # every 15 minutes (UTC)
+    # small offset + every 15 mins on weekdays (UTC)
+    - cron: "3-58/15 * * 1-5"
   workflow_dispatch: {}
 
-permissions:
-  contents: write
+# avoid overlapping runs fighting for cookies/IP
+concurrency:
+  group: nse-option-chain
+  cancel-in-progress: true
 
 jobs:
   scrape:
+    # try the whole job twice before giving up (handles transient 403/timeout)
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        attempt: [1, 2]
+
     runs-on: ubuntu-latest
 
     services:
@@ -22,7 +32,7 @@ jobs:
           --health-cmd="curl -sf http://localhost:4444/status | grep -q '\"ready\": true' || exit 1"
           --health-interval=10s
           --health-timeout=5s
-          --health-retries=30
+          --health-retries=60   # give Firefox time to be really ready
 
     steps:
       - name: Checkout repo
@@ -31,23 +41,28 @@ jobs:
       - name: Setup R
         uses: r-lib/actions/setup-r@v2
 
-      # Faster install + caching of R packages
       - name: Install R deps (pak)
         uses: r-lib/actions/setup-r-dependencies@v2
         with:
           packages: |
             any::RSelenium
-            any::rvest
+            any::httr
+            any::jsonlite
             any::dplyr
             any::tidyr
             any::readr
-            any::readxl
             any::writexl
-            any::stringr
-            any::httr
-            any::jsonlite
 
-      - name: Wait for Selenium
+      # Jitter so we don't always hit NSE at the exact same second as everyone else
+      - name: Random jitter
+        shell: bash
+        run: |
+          s=$((RANDOM % 15))
+          echo "Sleeping ${s}s before scrape..."
+          sleep $s
+
+      - name: Wait for Selenium (belt-and-suspenders)
+        shell: bash
         run: |
           for i in {1..60}; do
             if curl -sf http://localhost:4444/status | grep -q '"ready": true'; then
@@ -57,11 +72,12 @@ jobs:
           done
           echo "Selenium not ready in time"; exit 1
 
-      - name: Run scraper
+      - name: Run scraper (attempt ${{ matrix.attempt }})
         run: Rscript scrape_nse.R
 
-      - name: Commit results to repo (main branch)
-        if: success()
+      # Commit outputs back to repo (only once, even if attempt 2 ran)
+      - name: Commit results to repo (main)
+        if: success() && matrix.attempt == 1
         run: |
           echo "Output dir contents:"
           ls -lah output || true
@@ -69,20 +85,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Explicitly add the desired files
           git add output/*.csv 2>/dev/null || true
           git add output/*.xlsx 2>/dev/null || true
           git add output/*_raw.json 2>/dev/null || true
 
-          # Commit only if there are staged changes
           if ! git diff --cached --quiet; then
             git commit -m "Update option chain $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
             git push
           else
             echo "No changes to commit."
           fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # OPTIONAL email step goes here (only on attempt 1). Omitted for brevity.
 
       - name: Upload artifacts (outputs + debug)
         if: always()
@@ -93,3 +107,4 @@ jobs:
             output/**
             debug/**
           if-no-files-found: warn
+          retention-days: 30
