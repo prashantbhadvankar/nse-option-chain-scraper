@@ -2,9 +2,18 @@ name: Scrape NSE Option Chain
 
 on:
   schedule:
-    # Mon–Fri 09:00–16:00 IST (03:30–10:30 UTC), every 10 minutes
-    - cron: "*/10 3-10 * * 1-5"
+    # 03:30–03:50 UTC  (09:00–09:20 IST)
+    - cron: "30-59/10 3 * * 1-5"
+    # 04:00–09:50 UTC  (09:30–15:20 IST)
+    - cron: "*/10 4-9 * * 1-5"
+    # 10:00–10:30 UTC  (15:30–16:00 IST)
+    - cron: "0-30/10 10 * * 1-5"
   workflow_dispatch: {}
+
+# prevent overlapping runs from stepping on each other
+concurrency:
+  group: nse-option-chain
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -16,17 +25,21 @@ jobs:
     services:
       selenium:
         image: selenium/standalone-firefox:latest
-        ports: ["4444:4444"]
+        ports:
+          - 4444:4444
         options: >-
           --shm-size="2g"
           --health-cmd="curl -sf http://localhost:4444/status | grep -q '\"ready\": true' || exit 1"
           --health-interval=10s
           --health-timeout=5s
-          --health-retries=30
+          --health-retries=60
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Setup R
         uses: r-lib/actions/setup-r@v2
@@ -46,6 +59,10 @@ jobs:
             any::httr
             any::jsonlite
 
+      - name: Random jitter (2–15s)
+        run: |
+          s=$((RANDOM % 14 + 2)); echo "Sleeping $s s"; sleep $s
+
       - name: Wait for Selenium
         run: |
           for i in {1..60}; do
@@ -64,8 +81,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Output dir contents:"
-          ls -lah output || true
+          set -euxo pipefail
+          echo "Output dir contents:"; ls -lah output || true
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -74,78 +91,30 @@ jobs:
           git add output/*.xlsx 2>/dev/null || true
           git add output/*_raw.json 2>/dev/null || true
 
-          if ! git diff --cached --quiet; then
-            git commit -m "Update option chain $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
-            git push
-          else
-            echo "No changes to commit."
+          if git diff --cached --quiet; then
+            echo "No changes to commit."; exit 0
           fi
 
-      # ---------------- Google Drive upload ----------------
+          git commit -m "Update option chain $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
 
-      - name: Install rclone
-        run: |
-          if ! command -v rclone >/dev/null 2>&1; then
-            sudo apt-get update -y || true
-            sudo apt-get install -y rclone || {
-              curl -fsSL https://rclone.org/install.sh | sudo -E bash
-            }
-          fi
-          rclone version
+          # Rebase + retry to avoid non-fast-forward failures
+          for a in 1 2 3; do
+            git fetch origin main
+            git rebase origin/main || (git rebase --abort && sleep $((5*a)) && continue)
+            if git push origin HEAD:main; then
+              echo "Push ok on attempt $a"; exit 0
+            fi
+            echo "Push failed; retrying…"; sleep $((5*a))
+          done
+          echo "Push failed after retries"; exit 1
 
-      - name: Prepare rclone config (service account)
-        env:
-          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
-        run: |
-          # Write the service-account JSON to a file rclone can read
-          echo "$GDRIVE_SA_JSON" > sa.json
-
-          # Create a minimal rclone config that uses that SA
-          cat > rclone.conf <<'CFG'
-          [gdrive]
-          type = drive
-          scope = drive
-          service_account_file = sa.json
-          CFG
-
-          echo "rclone config created:"
-          sed -n '1,3p' rclone.conf
-
-      - name: Upload latest Excel to Google Drive
-        env:
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          LATEST_XLSX="$(ls -1t output/*UTC.xlsx | head -n 1 || true)"
-          echo "Uploading: ${LATEST_XLSX:-<none found>}"
-          echo "Folder ID: ${GDRIVE_FOLDER_ID:-<missing>}"
-
-          if [[ -z "${LATEST_XLSX:-}" ]]; then
-            echo "No XLSX found in output/. Nothing to upload."
-            exit 0
-          fi
-
-          if [[ -z "${GDRIVE_FOLDER_ID:-}" ]]; then
-            echo "ERROR: GDRIVE_FOLDER_ID secret is missing."
-            exit 1
-          fi
-
-          # Try to upload to the specified folder
-          rclone --config rclone.conf copy "${LATEST_XLSX}" "gdrive:${GDRIVE_FOLDER_ID}" --progress || {
-            echo ">>> ERROR: rclone couldn't access the folder."
-            echo "    Check BOTH:"
-            echo "    - GDRIVE_FOLDER_ID is the exact folder ID (from Drive URL after 'folders/')"
-            echo "    - The service account is shared on that folder (Editor) or on the Shared Drive."
-            exit 1
-          }
-
-      # Keep a copy as a workflow artifact too (optional)
-      - name: Upload artifact (latest xlsx)
+      - name: Upload artifacts (outputs + debug)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: latest-xlsx
-          path: output/*UTC.xlsx
+          name: option-chain-output
+          path: |
+            output/**
+            debug/**
           if-no-files-found: warn
+          retention-days: 30
