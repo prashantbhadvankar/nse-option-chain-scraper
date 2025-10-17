@@ -2,8 +2,18 @@ name: Scrape NSE Option Chain
 
 on:
   schedule:
-    - cron: "*/15 * * * *"    # every 15 minutes (UTC)
+    # 03:30–03:50 UTC  (09:00–09:20 IST)
+    - cron: "30-59/10 3 * * 1-5"
+    # 04:00–09:50 UTC  (09:30–15:20 IST)
+    - cron: "*/10 4-9 * * 1-5"
+    # 10:00–10:30 UTC  (15:30–16:00 IST)
+    - cron: "0-30/10 10 * * 1-5"
   workflow_dispatch: {}
+
+# prevent overlapping runs from stepping on each other
+concurrency:
+  group: nse-option-chain
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -22,16 +32,18 @@ jobs:
           --health-cmd="curl -sf http://localhost:4444/status | grep -q '\"ready\": true' || exit 1"
           --health-interval=10s
           --health-timeout=5s
-          --health-retries=30
+          --health-retries=60
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Setup R
         uses: r-lib/actions/setup-r@v2
 
-      # Faster install + caching of R packages
       - name: Install R deps (pak)
         uses: r-lib/actions/setup-r-dependencies@v2
         with:
@@ -46,6 +58,10 @@ jobs:
             any::stringr
             any::httr
             any::jsonlite
+
+      - name: Random jitter (2–15s)
+        run: |
+          s=$((RANDOM % 14 + 2)); echo "Sleeping $s s"; sleep $s
 
       - name: Wait for Selenium
         run: |
@@ -62,27 +78,35 @@ jobs:
 
       - name: Commit results to repo (main branch)
         if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Output dir contents:"
-          ls -lah output || true
+          set -euxo pipefail
+          echo "Output dir contents:"; ls -lah output || true
 
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Explicitly add the desired files
-          git add output/*.csv 2>/dev/null || true
+          git add output/*.csv  2>/dev/null || true
           git add output/*.xlsx 2>/dev/null || true
           git add output/*_raw.json 2>/dev/null || true
 
-          # Commit only if there are staged changes
-          if ! git diff --cached --quiet; then
-            git commit -m "Update option chain $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
-            git push
-          else
-            echo "No changes to commit."
+          if git diff --cached --quiet; then
+            echo "No changes to commit."; exit 0
           fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          git commit -m "Update option chain $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
+
+          # Rebase + retry to avoid non-fast-forward failures
+          for a in 1 2 3; do
+            git fetch origin main
+            git rebase origin/main || (git rebase --abort && sleep $((5*a)) && continue)
+            if git push origin HEAD:main; then
+              echo "Push ok on attempt $a"; exit 0
+            fi
+            echo "Push failed; retrying…"; sleep $((5*a))
+          done
+          echo "Push failed after retries"; exit 1
 
       - name: Upload artifacts (outputs + debug)
         if: always()
@@ -93,3 +117,4 @@ jobs:
             output/**
             debug/**
           if-no-files-found: warn
+          retention-days: 30
